@@ -25,24 +25,23 @@
 import os
 import re
 import errno
-import termios
 from binascii import hexlify
+import ftd2xx as ftdi
 
 try:
     import usb1 as libusb
-except ImportError:  # pragma: no cover
+except ImportError:
     raise ImportError("missing usb1 module, try 'pip install libusb1'")
 
 try:
     import serial
-    import serial.tools.list_ports
-except ImportError:  # pragma: no cover
+except ImportError:
     raise ImportError("missing serial module, try 'pip install pyserial'")
 
 import logging
 log = logging.getLogger(__name__)
 
-PATH = re.compile(r'^([a-z]+)(?::|)([a-zA-Z0-9-]+|)(?::|)([a-zA-Z0-9]+|)$')
+PATH = re.compile(r'^([a-z][a-z]+)(?::|)([a-zA-Z0-9]+|)(?::|)([a-zA-Z0-9]+|)$')
 
 
 class TTY(object):
@@ -54,52 +53,46 @@ class TTY(object):
             return
 
         match = PATH.match(path)
-
         if match and match.group(1) == "tty":
-            if re.match(r'^(S|ACM|AMA|USB)\d+$', match.group(2)):
-                TTYS = re.compile(r'^tty{}$'.format(match.group(2)))
-                glob = False
-            elif re.match(r'^(S|ACM|AMA|USB)$', match.group(2)):
-                TTYS = re.compile(r'^tty{}\d+$'.format(match.group(2)))
-                glob = True
-            elif re.match(r'^usbserial-\w+$', match.group(2)):
-                TTYS = re.compile(r'^cu\.{}$'.format(match.group(2)))
-                glob = False
-            elif re.match(r'^usbserial$', match.group(2)):
-                TTYS = re.compile(r'^cu\.usbserial-.*$')
-                glob = True
-            elif re.match(r'^.+$', match.group(2)):
-                TTYS = re.compile(r'^{}$'.format(match.group(2)))
-                glob = False
+            import termios
+            if re.match(r'^\D+\d+$', match.group(2)):
+                TTYS = re.compile(r'^tty{0}$'.format(match.group(2)))
+            elif re.match(r'^\D+$', match.group(2)):
+                TTYS = re.compile(r'^tty{0}\d+$'.format(match.group(2)))
+            elif re.match(r'^$', match.group(2)):
+                TTYS = re.compile(r'^tty(S|ACM|AMA|USB)\d+$')
             else:
-                TTYS = re.compile(r'^(tty(S|ACM|AMA|USB)\d+|cu\.usbserial.*)$')
-                glob = True
+                log.error("invalid port in 'tty' path: %r", match.group(2))
+                return
 
-            log.debug(TTYS.pattern)
             ttys = [fn for fn in os.listdir('/dev') if TTYS.match(fn)]
+            if len(ttys) == 0:
+                return
 
-            if len(ttys) > 0:
-                # Sort ttys with custom function to correctly order numbers.
-                ttys.sort(key=lambda item: (len(item), item))
-                log.debug('check: ' + ' '.join('/dev/' + tty for tty in ttys))
+            # Sort ttys with custom function to correctly order numbers.
+            pattern = re.compile('(\D+)(\d+)')
+            ttys.sort(key=lambda s: "%s%3s" % pattern.match(s).groups())
+            log.debug('trying /dev/tty%s', ' '.join([tty[3:] for tty in ttys]))
 
-                # Eliminate tty nodes that are not physically present or
-                # inaccessible by the current user. Propagate IOError when
-                # path designated exactly one device, otherwise just log.
-                for i, tty in enumerate(ttys):
+            # Eliminate tty nodes that are not physically present or
+            # inaccessible by the current user. Propagate IOError when
+            # path designated exactly one device, otherwise just log.
+            for i, tty in enumerate(ttys):
+                try:
                     try:
                         termios.tcgetattr(open('/dev/%s' % tty))
                         ttys[i] = '/dev/%s' % tty
-                    except termios.error as error:
+                    except termios.error:
                         pass
-                    except IOError as error:
+                except IOError as error:
+                    if not TTYS.pattern.endswith(r'\d+$'):
+                        raise
+                    else:
                         log.debug(error)
-                        if not glob:
-                            raise error
 
-                ttys = [tty for tty in ttys if tty.startswith('/dev/')]
-                log.debug('avail: %s', ' '.join([tty for tty in ttys]))
-                return ttys, match.group(3), glob
+            ttys = [tty for tty in ttys if tty.startswith('/dev/')]
+            log.debug('avail: %s', ' '.join([tty for tty in ttys]))
+            return ttys, match.group(3), TTYS.pattern.endswith(r'\d+$')
 
         if match and match.group(1) == "com":
             if re.match(r'^COM\d+$', match.group(2)):
@@ -107,6 +100,7 @@ class TTY(object):
             if re.match(r'^\d+$', match.group(2)):
                 return ["COM" + match.group(2)], match.group(3), False
             if re.match(r'^$', match.group(2)):
+                import serial.tools.list_ports
                 ports = [p[0] for p in serial.tools.list_ports.comports()]
                 log.debug('serial ports: %s', ' '.join([p for p in ports]))
                 return ports, match.group(3), True
@@ -173,6 +167,73 @@ class TTY(object):
             self.tty.close()
             self.tty = None
 
+class FTDI(object):
+    TYPE = "TTY"
+
+    @classmethod
+    def find(cls, path):
+        if not (path.startswith("ftdi")):
+            return
+        
+        device_list = ftdi.listDevices()
+        match = PATH.match(path)
+
+        if match and match.group(2) in device_list:
+            return [match.group(2)], match.group(3), False     
+
+    @property
+    def manufacturer_name(self):
+        return None
+
+    @property
+    def product_name(self):
+        return None
+
+    def __init__(self, serial=None):
+        self.tty = None
+        self.open(serial)
+
+    def open(self, serial, baudrate=115200):
+        self.close()
+        self.tty = ftdi.openEx(serial, ftdi.defines.OPEN_BY_SERIAL_NUMBER)
+        self.tty.setBaudRate(baudrate)
+
+    @property
+    def port(self):
+        return self.tty.serial if self.tty else ''
+
+    def read(self, timeout):
+        if self.tty is not None:
+            self.tty.timeout = max(timeout/1E3, 0.05)
+            frame = bytearray(self.tty.read(6))
+            if frame is None or len(frame) == 0:
+                raise IOError(errno.ETIMEDOUT, os.strerror(errno.ETIMEDOUT))
+            if frame.startswith(b"\x00\x00\xff\x00\xff\x00"):
+                log.log(logging.DEBUG-1, "<<< %s", str(frame).encode("hex"))
+                return frame
+            LEN = frame[3]
+            if LEN == 0xFF:
+                frame += self.tty.read(3)
+                LEN = frame[5] << 8 | frame[6]
+            frame += self.tty.read(LEN + 1)
+            log.log(logging.DEBUG-1, "<<< %s", hexlify(frame))
+            return frame
+
+    def write(self, frame):
+        if self.tty is not None:
+            log.log(logging.DEBUG-1, ">>> %s", hexlify(frame))
+            self.tty.purge()
+            try:
+                self.tty.write(str(frame))
+            except serial.SerialTimeoutException:
+                raise IOError(errno.EIO, os.strerror(errno.EIO))
+
+    def close(self):
+        if self.tty is not None:
+            self.tty.close()
+            self.tty = None
+
+
 
 class USB(object):
     TYPE = "USB"
@@ -226,7 +287,7 @@ class USB(object):
 
     def __del__(self):
         self.close()
-        if self.context:  # pragma: no branch
+        if self.context:
             self.context.exit()
 
     def open(self, usb_bus, dev_adr):

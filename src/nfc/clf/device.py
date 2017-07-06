@@ -116,6 +116,23 @@ def connect(path):
                     tty.close()
                     if not globbed:
                         raise
+    
+    found = transport.FTDI.find(path)
+    if found is not None:
+        devices = found[0]
+        drivers = [found[1]]
+        for drv in drivers:
+            for dev in devices:
+                log.debug("trying {0} on {1}".format(drv, dev))
+                driver = importlib.import_module("nfc.clf." + drv)
+                try:
+                    tty = transport.FTDI(dev)
+                    device = driver.init(tty)
+                    device._path = dev
+                    return device
+                except IOError as error:
+                    log.debug(error)
+                    tty.close()
 
     if path.startswith("udp"):
         path = path.split(':')
@@ -165,11 +182,6 @@ class Device(object):
     @property
     def path(self):
         return self._path
-
-    def close(self):
-        fname = "close"
-        cname = self.__class__.__module__ + '.' + self.__class__.__name__
-        raise NotImplementedError("%s.%s() is required" % (cname, fname))
 
     def mute(self):
         """Mutes all existing communication, most notably the device will no
