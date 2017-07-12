@@ -197,6 +197,11 @@ class FTDI(object):
         self.close()
         self.tty = ftdi.openEx(serial, ftdi.defines.OPEN_BY_SERIAL_NUMBER)
         self.tty.setBaudRate(baudrate)
+        self.tty.setFlowControl(ftdi.defines.FLOW_NONE)
+        self.tty.setDataCharacteristics(ftdi.defines.BITS_8,
+                                           ftdi.defines.STOP_BITS_1,
+                                           ftdi.defines.PARITY_NONE)
+        self.tty.setRts()
 
     @property
     def port(self):
